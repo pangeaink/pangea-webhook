@@ -3,53 +3,60 @@ const app = express();
 app.use(express.json());
 
 // ─── CONFIG ───────────────────────────────────────────────
-const KOMMO_SUBDOMAIN = process.env.KOMMO_SUBDOMAIN || 'pangeainkinfo';
-const KOMMO_TOKEN     = process.env.KOMMO_TOKEN;
-const HC_API_KEY      = process.env.HC_API_KEY;
-const PORT            = process.env.PORT || 3000;
+const KOMMO_SUBDOMAIN  = process.env.KOMMO_SUBDOMAIN  || 'pangeainkinfo';
+const KOMMO_TOKEN      = process.env.KOMMO_TOKEN;
+const HC_API_KEY       = process.env.HC_API_KEY;
+const PORT             = process.env.PORT || 3000;
+const GOOGLE_REVIEW    = process.env.GOOGLE_REVIEW_LINK || 'https://g.page/r/XXXXXXX/review';
+const CALENDLY         = process.env.CALENDLY_LINK     || 'https://calendly.com/pangeaink';
+const INSTAGRAM        = '@pangeaink';
 
 // ─── HIGHLIGHTCARDS CARD IDs ──────────────────────────────
-// Reemplaza estos IDs cuando crees las tarjetas en Highlightcards
 const CARDS = {
-  TT: process.env.HC_CARD_TT, // Tattoo Turista
-  TL: process.env.HC_CARD_TL, // Tattoo Local
-  PT: process.env.HC_CARD_PT, // Piercing Turista
-  PL: process.env.HC_CARD_PL, // Piercing Local
+  TT: process.env.HC_CARD_TT,
+  TL: process.env.HC_CARD_TL,
+  PT: process.env.HC_CARD_PT,
+  PL: process.env.HC_CARD_PL,
 };
 
 // ─── KOMMO PIPELINE IDs ───────────────────────────────────
-// Reemplaza cuando estructuremos Kommo
 const PIPELINES = {
-  TT: process.env.KOMMO_PIPELINE_TT,
-  TL: process.env.KOMMO_PIPELINE_TL,
-  PT: process.env.KOMMO_PIPELINE_PT,
-  PL: process.env.KOMMO_PIPELINE_PL,
+  TT: process.env.KOMMO_PIPELINE_TT || '13875504',
+  TL: process.env.KOMMO_PIPELINE_TL || '13875508',
+  PT: process.env.KOMMO_PIPELINE_PT || '13875512',
+  PL: process.env.KOMMO_PIPELINE_PL || '13875516',
 };
 
-// ─── WHATSAPP MESSAGES ────────────────────────────────────
-const MESSAGES = {
-  TT: {
-    day0:  `🖤 Welcome to Pangea Ink! Your experience is permanent — and so is our gratitude. Check your tattoo care instructions here: [link]`,
-    day0b: `⭐ We'd love your Google Review while Panama is still fresh! It takes 30 seconds: [google_review_link]`,
-    day1:  `📸 Share your Pangea experience! Tag us @pangeaink — we'd love to repost your story.`,
-    day2:  `🤘 Know someone who wants to get tattooed in Panama? Send them your referral link and you both win: [referral_link]`,
-  },
-  TL: {
-    day0:  `🖤 Gracias por confiar en Pangea Ink. Tu tatuaje es para siempre — al igual que nuestra dedicación. Instrucciones de cuidado: [link]`,
-    day3:  `⭐ ¿Nos regalas una reseña en Google? Solo 30 segundos y nos ayuda muchísimo: [google_review_link]`,
-    day7:  `🤘 ¿Tienes alguien que quiera tatuarse? Comparte tu link de referido y ambos ganan: [referral_link]`,
-    day30: `🖤 ¡Han pasado 30 días! ¿Cómo está tu tatuaje? ¿Ya tienes en mente el próximo proyecto?`,
-  },
-  PT: {
-    day0:  `🖤 Welcome to Pangea Ink! Your piercing looks amazing. Care instructions: [link]`,
-    day0b: `⭐ Quick Google Review before you leave Panama? Means the world to us: [google_review_link]`,
-    day1:  `🤘 Share your Pangea piercing! Tag us @pangeaink`,
-  },
-  PL: {
-    day0:  `🖤 ¡Gracias por tu visita a Pangea Ink! Aquí tus instrucciones de cuidado del piercing: [link]`,
-    day3:  `⭐ ¿Nos dejas una reseña en Google? 30 segundos: [google_review_link]`,
-    day14: `💎 ¿Listo para el siguiente piercing? Escríbenos cuando quieras.`,
-  },
+const BASE_URL = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4`;
+const KOMMO_HEADERS = {
+  'Authorization': `Bearer ${KOMMO_TOKEN}`,
+  'Content-Type': 'application/json',
+};
+
+// ─── MENSAJES WHATSAPP ────────────────────────────────────
+const SEQUENCES = {
+  TT: [
+    { delay: 0,                          msg: (n) => `🖤 *${n}*, gracias por vivir esta experiencia con nosotros en Pangea Ink.\n\nTu tatuaje es permanente — y también lo es nuestro compromiso.\n\n📋 Cuidados: ${CALENDLY}\n\n¡Bienvenido a la familia! 🤘` },
+    { delay: 2 * 60 * 60 * 1000,        msg: (n) => `⭐ *${n}*, ¿nos regalas 30 segundos?\n\nTu opinión en Google nos ayuda mucho:\n👉 ${GOOGLE_REVIEW}\n\n¡Gracias! 🖤` },
+    { delay: 24 * 60 * 60 * 1000,       msg: (n) => `📸 *${n}*, etiquétanos en ${INSTAGRAM} — nos encantaría compartir tu historia. 🤘🖤` },
+    { delay: 2 * 24 * 60 * 60 * 1000,   msg: (n) => `🤘 ¿Conoces a alguien que quiera tatuarse en Panamá?\n\nComparte Pangea Ink con ellos 👉 ${CALENDLY}` },
+  ],
+  TL: [
+    { delay: 0,                          msg: (n) => `🖤 *${n}*, gracias por confiar en Pangea Ink.\n\n📋 Cuidados: ${CALENDLY}` },
+    { delay: 3 * 24 * 60 * 60 * 1000,   msg: (n) => `⭐ *${n}*, ¿nos dejas una reseña?\n👉 ${GOOGLE_REVIEW}\n\n¡Gracias! 🖤` },
+    { delay: 7 * 24 * 60 * 60 * 1000,   msg: (n) => `🤘 *${n}*, ¿alguien que quiera tatuarse? Comparte Pangea 👉 ${CALENDLY}` },
+    { delay: 30 * 24 * 60 * 60 * 1000,  msg: (n) => `🖤 *${n}*, ¡un mes ya! ¿Cómo está el tatuaje? ¿Próximo proyecto? 🤘` },
+  ],
+  PT: [
+    { delay: 0,                          msg: (n) => `🖤 *${n}*, gracias por tu visita. 💎\n\n📋 Cuidados del piercing: ${CALENDLY}` },
+    { delay: 2 * 60 * 60 * 1000,        msg: (n) => `⭐ *${n}*, ¿nos dejas una reseña antes de salir de Panamá?\n👉 ${GOOGLE_REVIEW} 🖤` },
+    { delay: 24 * 60 * 60 * 1000,       msg: (n) => `📸 Etiquétanos en ${INSTAGRAM} 💎🖤` },
+  ],
+  PL: [
+    { delay: 0,                          msg: (n) => `🖤 *${n}*, gracias por tu visita.\n\n📋 Cuidados: ${CALENDLY}` },
+    { delay: 3 * 24 * 60 * 60 * 1000,   msg: (n) => `⭐ *${n}*, ¿nos dejas una reseña?\n👉 ${GOOGLE_REVIEW} 🖤` },
+    { delay: 14 * 24 * 60 * 60 * 1000,  msg: (n) => `💎 *${n}*, ¿listo para el siguiente piercing? Aquí estamos 🖤\n${CALENDLY}` },
+  ],
 };
 
 // ─── HELPERS ──────────────────────────────────────────────
@@ -67,90 +74,118 @@ async function issueHighlightCard(cardId, customer) {
   if (!cardId || !HC_API_KEY) return null;
   const res = await fetch(`https://app.highlightcards.co.uk/api/v1/cards/${cardId}/issue`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${HC_API_KEY}`,
-    },
-    body: JSON.stringify({
-      first_name: customer.firstName,
-      last_name:  customer.lastName  || '',
-      phone:      customer.phone     || '',
-      email:      customer.email     || '',
-    }),
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${HC_API_KEY}` },
+    body: JSON.stringify({ first_name: customer.firstName, phone: customer.phone, email: customer.email }),
   });
-  const data = await res.json();
-  console.log('Highlightcards response:', data);
-  return data;
+  return await res.json();
 }
 
-async function tagLeadInKommo(leadId, type, pipeline) {
-  if (!KOMMO_TOKEN) return null;
-  const body = { tags: [{ name: type }] };
-  if (pipeline) body.pipeline_id = parseInt(pipeline);
-
-  const res = await fetch(`https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`, {
+async function updateLeadInKommo(leadId, type) {
+  if (!KOMMO_TOKEN || !leadId) return null;
+  const res = await fetch(`${BASE_URL}/leads/${leadId}`, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${KOMMO_TOKEN}`,
-    },
-    body: JSON.stringify(body),
+    headers: KOMMO_HEADERS,
+    body: JSON.stringify({
+      pipeline_id: parseInt(PIPELINES[type]),
+      tags: [{ name: type }],
+    }),
   });
-  const data = await res.json();
-  console.log('Kommo response:', data);
-  return data;
+  return await res.json();
+}
+
+async function sendNoteToKommo(leadId, text) {
+  if (!KOMMO_TOKEN || !leadId) return null;
+  const res = await fetch(`${BASE_URL}/leads/${leadId}/notes`, {
+    method: 'POST',
+    headers: KOMMO_HEADERS,
+    body: JSON.stringify([{ note_type: 'common', params: { text } }]),
+  });
+  return await res.json();
+}
+
+async function createKommoTask(leadId, text, dueDateMs) {
+  if (!KOMMO_TOKEN || !leadId) return null;
+  const res = await fetch(`${BASE_URL}/tasks`, {
+    method: 'POST',
+    headers: KOMMO_HEADERS,
+    body: JSON.stringify([{
+      entity_id: parseInt(leadId),
+      entity_type: 'leads',
+      task_type_id: 1,
+      text,
+      complete_till: Math.floor(dueDateMs / 1000),
+      responsible_user_id: 12039579,
+    }]),
+  });
+  return await res.json();
+}
+
+function scheduleMessages(type, leadId, customerName) {
+  const seq = SEQUENCES[type];
+  if (!seq) return;
+
+  console.log(`\n📅 Secuencia ${type} programada para "${customerName}"`);
+
+  seq.forEach((item, i) => {
+    const dueMs = Date.now() + item.delay;
+    const hours = Math.round(item.delay / 3600000);
+    console.log(`  → Msg ${i+1}: ${hours === 0 ? 'inmediato' : `en ${hours}h`}`);
+
+    setTimeout(async () => {
+      const text = item.msg(customerName);
+      console.log(`\n📲 Enviando msg ${i+1}/${seq.length} [${type}] para "${customerName}"`);
+
+      if (item.delay <= 3 * 24 * 60 * 60 * 1000) {
+        await sendNoteToKommo(leadId, text);
+      } else {
+        await createKommoTask(leadId, `WhatsApp para ${customerName}: ${text}`, dueMs);
+      }
+    }, item.delay);
+  });
 }
 
 // ─── MAIN WEBHOOK ─────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   try {
-    console.log('📦 Incoming webhook:', JSON.stringify(req.body, null, 2));
+    console.log('\n📦 Webhook recibido:', JSON.stringify(req.body, null, 2));
 
     const body     = req.body;
-    const note     = body.note || body.line_items_note || body.order_note || '';
-    const leadId   = body.lead_id || body.kommo_lead_id || null;
+    const note     = body.note || body.customer_note || '';
+    const leadId   = body.lead_id || null;
+    const location = body.location || 'unknown';
     const customer = {
-      firstName: body.customer_name || body.first_name || 'Cliente',
-      lastName:  body.last_name  || '',
-      phone:     body.phone      || body.customer_phone || '',
-      email:     body.email      || body.customer_email || '',
+      firstName: body.customer_name || 'Cliente',
+      phone:     body.phone || '',
+      email:     body.email || '',
     };
-    const location = body.location || 'unknown'; // "Casco Viejo" or "Via Argentina"
 
-    console.log(`📍 Location: ${location}`);
-    console.log(`📝 Note: "${note}"`);
+    console.log(`📍 Sucursal: ${location}`);
+    console.log(`📝 Nota: "${note}"`);
 
-    // 1. Detect client type
     const type = detectType(note);
     if (!type) {
-      console.log('⚠️  No type detected in note. Skipping segmentation.');
+      console.log('⚠️  Tipo no detectado. Agrega TT/TL/PT/PL en la nota de Square.');
       return res.json({ status: 'skipped', reason: 'no type in note' });
     }
-    console.log(`✅ Type detected: ${type}`);
+    console.log(`✅ Tipo: ${type}`);
 
-    // 2. Issue Highlightcards card
+    // 1. Highlightcards
     const cardId = CARDS[type];
     if (cardId) {
       await issueHighlightCard(cardId, customer);
-      console.log(`🃏 Card issued for type: ${type}`);
-    } else {
-      console.log(`⚠️  No card ID configured for type: ${type}`);
+      console.log(`🃏 Tarjeta ${type} emitida`);
     }
 
-    // 3. Tag lead in Kommo
+    // 2. Kommo — mover al pipeline correcto
     if (leadId) {
-      await tagLeadInKommo(leadId, type, PIPELINES[type]);
-      console.log(`🏷️  Lead ${leadId} tagged as ${type} in Kommo`);
-    } else {
-      console.log('⚠️  No lead ID provided — skipping Kommo tagging');
+      await updateLeadInKommo(leadId, type);
+      console.log(`🏷️  Lead ${leadId} → Pipeline ${type}`);
     }
 
-    res.json({
-      status:   'success',
-      type,
-      location,
-      customer: customer.firstName,
-    });
+    // 3. Secuencia WhatsApp
+    scheduleMessages(type, leadId, customer.firstName);
+
+    res.json({ status: 'success', type, customer: customer.firstName });
 
   } catch (err) {
     console.error('❌ Error:', err);
@@ -158,15 +193,6 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ─── HEALTH CHECK ─────────────────────────────────────────
-app.get('/', (req, res) => {
-  res.json({
-    status:  'Pangea Ink Webhook Server 🖤',
-    version: '1.0.0',
-    ready:   true,
-  });
-});
+app.get('/', (req, res) => res.json({ status: '🖤 Pangea Ink Webhook v2.0 — Online' }));
 
-app.listen(PORT, () => {
-  console.log(`🖤 Pangea webhook server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🖤 Pangea webhook server running on port ${PORT}`));
