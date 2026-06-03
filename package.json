@@ -1,0 +1,19 @@
+{
+  "name": "pangea-ink-webhook",
+  "version": "1.0.0",
+  "description": "Pangea Ink automation webhook — Square → Kommo → Highlightcards",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
