@@ -65,6 +65,7 @@ const SEDE_LINKS = {
 const KOMMO_FIELD_SEDE          = process.env.KOMMO_FIELD_SEDE;          // texto: "casco-viejo" / "via-argentina"
 const KOMMO_FIELD_REVIEW_LINK   = process.env.KOMMO_FIELD_REVIEW_LINK;   // texto: review link de la sede
 const KOMMO_FIELD_CALENDLY_LINK = process.env.KOMMO_FIELD_CALENDLY_LINK; // texto: calendly link de la sede
+const KOMMO_FIELD_IDIOMA        = process.env.KOMMO_FIELD_IDIOMA;        // texto: "es" / "en" (v2.2)
 
 // Traduce un Location Id de Square a su sede. Si no lo reconoce, devuelve null
 // (y lo deja registrado para detectarlo en logs).
@@ -75,6 +76,29 @@ function resolveSede(locationId) {
   }
   return sede;
 }
+
+// ─── NUEVO v2.2: IDIOMA por teléfono ──────────────────────────────────────────
+// Regla de Carlos (14 jun 2026): +507 (Panamá) = español; cualquier otro código
+// internacional = inglés; SIN teléfono = inglés (apuesta segura, turista de paso).
+// Devuelve "es" o "en".
+function detectLang(phone) {
+  if (!phone) return 'en';                       // sin teléfono → inglés
+  // Normaliza: deja solo dígitos (quita +, espacios, guiones, paréntesis).
+  const digits = String(phone).replace(/\D/g, '');
+  if (!digits) return 'en';
+  // Panamá = código 507. Aceptamos con o sin prefijos internacionales (00, 011).
+  let d = digits;
+  if (d.startsWith('00'))  d = d.slice(2);       // prefijo internacional 00
+  if (d.startsWith('011')) d = d.slice(3);       // prefijo internacional EEUU 011
+  if (d.startsWith('507')) return 'es';          // Panamá → español
+  // Número local panameño sin código país: 8 dígitos que empiezan con 6 (móvil PA).
+  if (digits.length === 8 && digits.startsWith('6')) return 'es';
+  return 'en';                                   // cualquier otro → inglés
+}
+
+// Tipo por defecto cuando la nota NO trae TT/TL/PT/PL (merch / compra sin servicio).
+// Estos NO emiten tarjeta de fidelidad, pero sí entran al flujo "Compra general".
+const RETAIL = 'RETAIL';
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -253,25 +277,32 @@ app.post('/webhook', async (req, res) => {
     console.log(`📍 Location Id: ${location} → Sede: ${sede || 'NO RECONOCIDA'}`);
     console.log(`📝 Note: "${note}"`);
 
+    // ── NUEVO v2.2: idioma por teléfono (es/en) ───────────────────────────────
+    const lang = detectLang(customer.phone);
+    console.log(`🗣️  Idioma: ${lang} (teléfono: ${customer.phone || 'sin teléfono'})`);
+
     // ── 1. Detect client type ─────────────────────────────────────────────────
-    const type = detectType(note);
-    if (!type) {
-      console.log('⚠️  No type detected in note. Skipping.');
-      return res.json({ status: 'skipped', reason: 'no type in note', note });
-    }
-    console.log(`✅ Type detected: ${type}`);
+    // v2.2: si NO hay código de servicio (TT/TL/PT/PL), NO se descarta — se trata
+    // como RETAIL (merch / compra sin servicio): recibe el gracias y entra al flujo
+    // "Compra general", pero NO se le emite tarjeta de fidelidad (esas son para
+    // tatuaje/piercing). El enrutamiento RETAIL lo maneja el Salesbot/pipeline.
+    const detected = detectType(note);
+    const type     = detected || RETAIL;
+    const isService = !!detected;   // true para TT/TL/PT/PL; false para RETAIL
+    console.log(isService ? `✅ Type detected: ${type}` : `🛍️  Sin código de servicio → ${RETAIL} (merch / compra general)`);
 
     // ── 2. Fetch artist from Kommo ────────────────────────────────────────────
     // responsible_user.name → disponible en Salesbot como {{responsible_user.name}}
     const artist = await getArtistFromKommo(leadId);
 
-    // ── 3. Issue Highlightcards card ──────────────────────────────────────────
-    const cardId   = CARDS[type];
-    const hcResult = await issueHighlightCard(cardId, customer);
+    // ── 3. Issue Highlightcards card — SOLO para servicios (no RETAIL) ─────────
+    const cardId   = isService ? CARDS[type] : null;
+    const hcResult = isService ? await issueHighlightCard(cardId, customer) : null;
     const referralUrl = hcResult?.referralUrl || null;
+    if (!isService) console.log('🛍️  RETAIL: no se emite tarjeta de fidelidad (es para servicios).');
 
     // ── 4. Build Kommo custom fields ──────────────────────────────────────────
-    // Referral link + sede + links de la sede resueltos.
+    // Referral link (solo servicios) + sede + links de la sede + idioma.
     // Cada campo solo se escribe si su ID está configurado en las env vars.
     const customFields = [];
     if (referralUrl && HC_REFERRAL_FIELD_ID) {
@@ -298,16 +329,29 @@ app.post('/webhook', async (req, res) => {
         values:   [{ value: sedeData.calendly }],
       });
     }
+    if (KOMMO_FIELD_IDIOMA) {
+      customFields.push({
+        field_id: parseInt(KOMMO_FIELD_IDIOMA),
+        values:   [{ value: lang }],
+      });
+    }
 
     // ── 5. Update Kommo lead ──────────────────────────────────────────────────
     if (leadId) {
-      await updateLeadInKommo(leadId, type, PIPELINES[type], customFields);
-      console.log(`🏷️  Lead ${leadId} → ${type} @ ${sede || 'sede?'}`);
+      // Para RETAIL no hay pipeline en PIPELINES{}; se usa KOMMO_PIPELINE_RETAIL
+      // (opcional). Si no está, el lead solo se etiqueta y el routing lo hace el bot.
+      const pipelineForType = isService
+        ? PIPELINES[type]
+        : (process.env.KOMMO_PIPELINE_RETAIL || null);
+
+      await updateLeadInKommo(leadId, type, pipelineForType, customFields);
+      console.log(`🏷️  Lead ${leadId} → ${type} @ ${sede || 'sede?'} [${lang}]`);
 
       // Internal note with all key info (visible en Kommo)
       const noteText = [
-        `🖤 Pangea Webhook v2.1`,
-        `Tipo: ${type}`,
+        `🖤 Pangea Webhook v2.2`,
+        `Tipo: ${type}${isService ? '' : ' (merch / sin servicio — sin tarjeta)'}`,
+        `Idioma: ${lang}`,
         sedeName ? `Sucursal: ${sedeName} (${sede})` : `Sucursal: ⚠️ Location Id no reconocido (${location})`,
         artist.name ? `Artista: ${artist.name}`        : null,
         sedeData    ? `Review link: ${sedeData.review}`  : null,
@@ -327,6 +371,8 @@ app.post('/webhook', async (req, res) => {
     res.json({
       status:       'success',
       type,
+      isService,
+      lang,
       location,
       sede:         sede || null,
       sedeReconocida: !!sede,
@@ -364,16 +410,24 @@ app.get('/test-sede', (req, res) => {
 });
 
 // ─── DIAGNÓSTICO: probar la detección de tipo desde una nota ──────────────────
-// GET /test-type?note=Compra%20TT  → muestra qué tipo detecta.
+// GET /test-type?note=Compra%20TT  → muestra qué tipo detecta (o RETAIL si ninguno).
 app.get('/test-type', (req, res) => {
   const note = req.query.note || '';
-  res.json({ note, type: detectType(note) });
+  const detected = detectType(note);
+  res.json({ note, type: detected || RETAIL, isService: !!detected });
+});
+
+// ─── DIAGNÓSTICO: probar el idioma desde un teléfono ──────────────────────────
+// GET /test-lang?phone=+50762620736  → "es"  |  ?phone=+1305...  → "en"
+app.get('/test-lang', (req, res) => {
+  const phone = req.query.phone || '';
+  res.json({ phone, lang: detectLang(phone) });
 });
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: '🖤 Pangea Ink Webhook v2.1',
+    status: '🖤 Pangea Ink Webhook v2.2',
     ready:  true,
     node:   process.version,
     checks: {
@@ -387,16 +441,17 @@ app.get('/', (req, res) => {
       pipeline_TL:           !!PIPELINES.TL,
       pipeline_PT:           !!PIPELINES.PT,
       pipeline_PL:           !!PIPELINES.PL,
+      pipeline_RETAIL:       !!process.env.KOMMO_PIPELINE_RETAIL,
       hc_referral_field:     !!HC_REFERRAL_FIELD_ID,
-      // Campos de sede (opcionales — el webhook funciona sin ellos)
       field_sede:            !!KOMMO_FIELD_SEDE,
       field_review_link:     !!KOMMO_FIELD_REVIEW_LINK,
       field_calendly_link:   !!KOMMO_FIELD_CALENDLY_LINK,
+      field_idioma:          !!KOMMO_FIELD_IDIOMA,
     },
     sedes: Object.keys(SEDE_LINKS),
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`🖤 Pangea webhook v2.1 running on port ${PORT} (Node ${process.version})`);
+  console.log(`🖤 Pangea webhook v2.2 running on port ${PORT} (Node ${process.version})`);
 });
