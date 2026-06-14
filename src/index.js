@@ -2,11 +2,18 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
+// ─── COMPAT: garantizar fetch en Node < 18 ───────────────────────────────────
+// fetch global solo existe en Node 18+. Si Railway corre una versión anterior,
+// caemos a node-fetch. Así el webhook nunca truena por "fetch is not defined".
+if (typeof fetch === 'undefined') {
+  global.fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+}
+
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const KOMMO_SUBDOMAIN        = process.env.KOMMO_SUBDOMAIN || 'pangeainkinfo';
 const KOMMO_TOKEN            = process.env.KOMMO_TOKEN;
 const HC_API_KEY             = process.env.HC_API_KEY;
-const HC_REFERRAL_FIELD_ID   = process.env.HC_REFERRAL_FIELD_ID;  // Kommo custom field ID (agregar después)
+const HC_REFERRAL_FIELD_ID   = process.env.HC_REFERRAL_FIELD_ID;  // Kommo custom field ID
 const PORT                   = process.env.PORT || 3000;
 
 // ─── HIGHLIGHTCARDS CARD IDs ──────────────────────────────────────────────────
@@ -25,17 +32,80 @@ const PIPELINES = {
   PL: process.env.KOMMO_PIPELINE_PL,
 };
 
+// ─── MAPEO DE SEDE (bots×sede, v2.1) ──────────────────────────────────────────
+// Square manda el Location Id crudo (ej. "LHSEB0J3XZBM4"). Lo traducimos a una
+// sede legible y resolvemos los links de reseña/Calendly de ESA sede, para que
+// el Salesbot los use directo sin lógica condicional.
+// Location Ids de Square → Settings → Locations (confirmados jun 2026).
+const LOCATION_MAP = {
+  'LHSEB0J3XZBM4': 'casco-viejo',     // Pangea Ink Casco Viejo
+  'LN3YNP3NZGB38': 'via-argentina',   // Pangea Ink Via Argentina
+  'L0EEWR8XGGTV1': 'casco-viejo',     // Valhalla Tattoo (no se usa; fallback a casco por si entra)
+};
+
+// Links por sede. Override por variables de entorno; si no, usan los valores
+// confirmados (fichas de Google Business y eventos de Calendly, jun 2026).
+const SEDE_LINKS = {
+  'casco-viejo': {
+    nombre:   'Casco Viejo',
+    review:   process.env.GOOGLE_REVIEW_LINK_CASCO || 'https://g.page/r/CWrIShzGWNg8EBM/review',
+    calendly: process.env.CALENDLY_LINK_CASCO      || 'https://calendly.com/pangeaink-info/reserva-clon',
+  },
+  'via-argentina': {
+    nombre:   'Vía Argentina',
+    review:   process.env.GOOGLE_REVIEW_LINK_VA || 'https://g.page/r/CR6SHjnBnBxcEBM/review',
+    calendly: process.env.CALENDLY_LINK_VA      || 'https://calendly.com/pangeaink-info/reserva',
+  },
+};
+
+// IDs de campos personalizados de Kommo donde el webhook escribe la sede y los
+// links resueltos, para que el Salesbot los inserte. Crear estos campos en Kommo
+// y poner sus IDs aquí (env vars). Si no existen, el webhook NO falla: simplemente
+// no escribe esos campos (la info igual va en la nota interna).
+const KOMMO_FIELD_SEDE          = process.env.KOMMO_FIELD_SEDE;          // texto: "casco-viejo" / "via-argentina"
+const KOMMO_FIELD_REVIEW_LINK   = process.env.KOMMO_FIELD_REVIEW_LINK;   // texto: review link de la sede
+const KOMMO_FIELD_CALENDLY_LINK = process.env.KOMMO_FIELD_CALENDLY_LINK; // texto: calendly link de la sede
+
+// Traduce un Location Id de Square a su sede. Si no lo reconoce, devuelve null
+// (y lo deja registrado para detectarlo en logs).
+function resolveSede(locationId) {
+  const sede = LOCATION_MAP[locationId] || null;
+  if (!sede) {
+    console.warn(`⚠️  Location Id no reconocido: "${locationId}" — revisar LOCATION_MAP`);
+  }
+  return sede;
+}
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+// Detecta el tipo de cliente a partir de la nota de Square.
+// ESTRICTO: busca el código como TOKEN aislado (separado por espacios, comas,
+// guiones, etc.), NO como substring. Así "TATTOO LOCAL" NO se confunde con TT,
+// y "PIERCING" no dispara nada raro. El equipo escribe el código (TT/TL/PT/PL)
+// en la nota; esta función lo encuentra aunque venga con otras palabras.
 function detectType(note) {
   if (!note) return null;
-  const n = note.toUpperCase().trim();
-  // Order matters: PT before PL, TT before TL
-  if (n.includes('TT')) return 'TT';
-  if (n.includes('PT')) return 'PT';
-  if (n.includes('TL')) return 'TL';
-  if (n.includes('PL')) return 'PL';
+  // Normaliza: mayúsculas y separa por cualquier no-letra → lista de tokens.
+  const tokens = note.toUpperCase().split(/[^A-Z]+/).filter(Boolean);
+  // Prioridad explícita por si (raro) hubiera más de un código en la nota.
+  for (const code of ['TT', 'PT', 'TL', 'PL']) {
+    if (tokens.includes(code)) return code;
+  }
   return null;
+}
+
+// Pequeño helper: lee la respuesta y avisa si el status HTTP no fue ok.
+async function safeJson(res, label) {
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error(`⚠️  ${label} respondió ${res.status}: ${text.slice(0, 200)}`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    // Algunas respuestas (204, errores) no traen JSON; no es fatal.
+    return null;
+  }
 }
 
 // Fetch responsible user name from Kommo lead
@@ -46,7 +116,7 @@ async function getArtistFromKommo(leadId) {
       `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`,
       { headers: { Authorization: `Bearer ${KOMMO_TOKEN}` } }
     );
-    const leadData = await leadRes.json();
+    const leadData = await safeJson(leadRes, 'Kommo lead (artist)');
     const userId = leadData?.responsible_user_id;
     if (!userId) return { name: null, userId: null };
 
@@ -54,7 +124,7 @@ async function getArtistFromKommo(leadId) {
       `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/users/${userId}`,
       { headers: { Authorization: `Bearer ${KOMMO_TOKEN}` } }
     );
-    const userData = await userRes.json();
+    const userData = await safeJson(userRes, 'Kommo user');
     const name = userData?.name || userData?.login || null;
     console.log(`🎨 Artist resolved: ${name} (userId: ${userId})`);
     return { name, userId };
@@ -87,10 +157,10 @@ async function issueHighlightCard(cardId, customer) {
         }),
       }
     );
-    const data = await res.json();
+    const data = await safeJson(res, 'Highlightcards issue');
     console.log('🃏 Highlightcards response:', JSON.stringify(data));
 
-    const walletUrl   = data?.wallet_url   || data?.pass_url     || data?.url    || null;
+    const walletUrl   = data?.wallet_url   || data?.pass_url      || data?.url   || null;
     const referralUrl = data?.referral_url || data?.referral_link || walletUrl   || null;
 
     return { walletUrl, referralUrl, raw: data };
@@ -119,7 +189,7 @@ async function updateLeadInKommo(leadId, type, pipeline, customFields = []) {
         body: JSON.stringify(body),
       }
     );
-    const data = await res.json();
+    const data = await safeJson(res, 'Kommo lead PATCH');
     console.log('✅ Kommo lead updated:', JSON.stringify(data));
     return data;
   } catch (err) {
@@ -149,7 +219,7 @@ async function addNoteToKommo(leadId, text) {
         ]),
       }
     );
-    const data = await res.json();
+    const data = await safeJson(res, 'Kommo note');
     console.log('📝 Note added to Kommo lead');
     return data;
   } catch (err) {
@@ -163,7 +233,7 @@ app.post('/webhook', async (req, res) => {
   try {
     console.log('📦 Incoming webhook:', JSON.stringify(req.body, null, 2));
 
-    const body   = req.body;
+    const body   = req.body || {};
     const note   = body.note || body.line_items_note || body.order_note || '';
     const leadId = body.lead_id || body.kommo_lead_id || null;
 
@@ -175,14 +245,19 @@ app.post('/webhook', async (req, res) => {
     };
     const location = body.location || 'unknown';
 
-    console.log(`📍 Location: ${location}`);
+    // Traducir el Location Id de Square a sede + resolver sus links
+    const sede      = resolveSede(location);                  // "casco-viejo" / "via-argentina" / null
+    const sedeData  = sede ? SEDE_LINKS[sede] : null;         // { nombre, review, calendly } o null
+    const sedeName  = sedeData ? sedeData.nombre : null;      // nombre legible (o null si no se reconoció)
+
+    console.log(`📍 Location Id: ${location} → Sede: ${sede || 'NO RECONOCIDA'}`);
     console.log(`📝 Note: "${note}"`);
 
     // ── 1. Detect client type ─────────────────────────────────────────────────
     const type = detectType(note);
     if (!type) {
       console.log('⚠️  No type detected in note. Skipping.');
-      return res.json({ status: 'skipped', reason: 'no type in note' });
+      return res.json({ status: 'skipped', reason: 'no type in note', note });
     }
     console.log(`✅ Type detected: ${type}`);
 
@@ -195,7 +270,9 @@ app.post('/webhook', async (req, res) => {
     const hcResult = await issueHighlightCard(cardId, customer);
     const referralUrl = hcResult?.referralUrl || null;
 
-    // ── 4. Build Kommo custom fields (if HC_REFERRAL_FIELD_ID is set) ─────────
+    // ── 4. Build Kommo custom fields ──────────────────────────────────────────
+    // Referral link + sede + links de la sede resueltos.
+    // Cada campo solo se escribe si su ID está configurado en las env vars.
     const customFields = [];
     if (referralUrl && HC_REFERRAL_FIELD_ID) {
       customFields.push({
@@ -203,20 +280,40 @@ app.post('/webhook', async (req, res) => {
         values:   [{ value: referralUrl }],
       });
     }
+    if (sede && KOMMO_FIELD_SEDE) {
+      customFields.push({
+        field_id: parseInt(KOMMO_FIELD_SEDE),
+        values:   [{ value: sede }],
+      });
+    }
+    if (sedeData && KOMMO_FIELD_REVIEW_LINK) {
+      customFields.push({
+        field_id: parseInt(KOMMO_FIELD_REVIEW_LINK),
+        values:   [{ value: sedeData.review }],
+      });
+    }
+    if (sedeData && KOMMO_FIELD_CALENDLY_LINK) {
+      customFields.push({
+        field_id: parseInt(KOMMO_FIELD_CALENDLY_LINK),
+        values:   [{ value: sedeData.calendly }],
+      });
+    }
 
     // ── 5. Update Kommo lead ──────────────────────────────────────────────────
     if (leadId) {
       await updateLeadInKommo(leadId, type, PIPELINES[type], customFields);
-      console.log(`🏷️  Lead ${leadId} → ${type}`);
+      console.log(`🏷️  Lead ${leadId} → ${type} @ ${sede || 'sede?'}`);
 
       // Internal note with all key info (visible en Kommo)
       const noteText = [
-        `🖤 Pangea Webhook v2`,
+        `🖤 Pangea Webhook v2.1`,
         `Tipo: ${type}`,
-        `Sucursal: ${location}`,
-        artist.name   ? `Artista: ${artist.name}`         : null,
-        referralUrl   ? `HC Referral Link: ${referralUrl}` : null,
-        cardId        ? `HC Card ID: ${cardId}`            : null,
+        sedeName ? `Sucursal: ${sedeName} (${sede})` : `Sucursal: ⚠️ Location Id no reconocido (${location})`,
+        artist.name ? `Artista: ${artist.name}`        : null,
+        sedeData    ? `Review link: ${sedeData.review}`  : null,
+        sedeData    ? `Calendly: ${sedeData.calendly}`   : null,
+        referralUrl ? `HC Referral Link: ${referralUrl}` : null,
+        cardId      ? `HC Card ID: ${cardId}`            : null,
       ]
         .filter(Boolean)
         .join('\n');
@@ -228,13 +325,18 @@ app.post('/webhook', async (req, res) => {
 
     // ── 6. Respond ────────────────────────────────────────────────────────────
     res.json({
-      status:      'success',
+      status:       'success',
       type,
       location,
-      customer:    customer.firstName,
-      artist:      artist.name,
+      sede:         sede || null,
+      sedeReconocida: !!sede,
+      reviewLink:   sedeData?.review   || null,
+      calendlyLink: sedeData?.calendly || null,
+      customer:     customer.firstName,
+      artist:       artist.name,
       referralUrl,
-      hcIssued:    !!hcResult,
+      hcIssued:     !!hcResult,
+      leadUpdated:  !!leadId,
     });
 
   } catch (err) {
@@ -243,27 +345,58 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// ─── DIAGNÓSTICO: probar el mapeo de sede sin hacer una compra real ───────────
+// GET /test-sede?location=LHSEB0J3XZBM4  → muestra a qué sede y links resuelve.
+// Útil para verificar la config sin tocar Square/Kommo.
+app.get('/test-sede', (req, res) => {
+  const location = req.query.location || '';
+  const sede     = resolveSede(location);
+  const sedeData = sede ? SEDE_LINKS[sede] : null;
+  res.json({
+    location,
+    sede:         sede || null,
+    reconocida:   !!sede,
+    nombre:       sedeData?.nombre   || null,
+    reviewLink:   sedeData?.review   || null,
+    calendlyLink: sedeData?.calendly || null,
+    mapeoCompleto: LOCATION_MAP,
+  });
+});
+
+// ─── DIAGNÓSTICO: probar la detección de tipo desde una nota ──────────────────
+// GET /test-type?note=Compra%20TT  → muestra qué tipo detecta.
+app.get('/test-type', (req, res) => {
+  const note = req.query.note || '';
+  res.json({ note, type: detectType(note) });
+});
+
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: '🖤 Pangea Ink Webhook v2.0',
+    status: '🖤 Pangea Ink Webhook v2.1',
     ready:  true,
+    node:   process.version,
     checks: {
-      kommo_token:       !!KOMMO_TOKEN,
-      hc_api_key:        !!HC_API_KEY,
-      hc_card_TT:        !!CARDS.TT,
-      hc_card_TL:        !!CARDS.TL,
-      hc_card_PT:        !!CARDS.PT,
-      hc_card_PL:        !!CARDS.PL,
-      pipeline_TT:       !!PIPELINES.TT,
-      pipeline_TL:       !!PIPELINES.TL,
-      pipeline_PT:       !!PIPELINES.PT,
-      pipeline_PL:       !!PIPELINES.PL,
-      hc_referral_field: !!HC_REFERRAL_FIELD_ID,
+      kommo_token:           !!KOMMO_TOKEN,
+      hc_api_key:            !!HC_API_KEY,
+      hc_card_TT:            !!CARDS.TT,
+      hc_card_TL:            !!CARDS.TL,
+      hc_card_PT:            !!CARDS.PT,
+      hc_card_PL:            !!CARDS.PL,
+      pipeline_TT:           !!PIPELINES.TT,
+      pipeline_TL:           !!PIPELINES.TL,
+      pipeline_PT:           !!PIPELINES.PT,
+      pipeline_PL:           !!PIPELINES.PL,
+      hc_referral_field:     !!HC_REFERRAL_FIELD_ID,
+      // Campos de sede (opcionales — el webhook funciona sin ellos)
+      field_sede:            !!KOMMO_FIELD_SEDE,
+      field_review_link:     !!KOMMO_FIELD_REVIEW_LINK,
+      field_calendly_link:   !!KOMMO_FIELD_CALENDLY_LINK,
     },
+    sedes: Object.keys(SEDE_LINKS),
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`🖤 Pangea webhook v2 running on port ${PORT}`);
+  console.log(`🖤 Pangea webhook v2.1 running on port ${PORT} (Node ${process.version})`);
 });
