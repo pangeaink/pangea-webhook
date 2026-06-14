@@ -67,6 +67,18 @@ const KOMMO_FIELD_REVIEW_LINK   = process.env.KOMMO_FIELD_REVIEW_LINK;   // text
 const KOMMO_FIELD_CALENDLY_LINK = process.env.KOMMO_FIELD_CALENDLY_LINK; // texto: calendly link de la sede
 const KOMMO_FIELD_IDIOMA        = process.env.KOMMO_FIELD_IDIOMA;        // texto: "es" / "en" (v2.2)
 
+// v2.3: pipeline destino para leads basura (el "eliminar lead" que ya existe).
+const KOMMO_PIPELINE_ELIMINAR   = process.env.KOMMO_PIPELINE_ELIMINAR;   // ID del pipeline "eliminar lead"
+
+// v2.3: ¿es un lead basura? Criterio de Carlos (14 jun): SIN teléfono Y SIN email
+// = no hay forma de contactarlo → se descarta a "eliminar lead". Si tiene al menos
+// uno de los dos, se procesa normal.
+function isJunkLead(customer) {
+  const hasPhone = !!(customer.phone && String(customer.phone).replace(/\D/g, '').length >= 6);
+  const hasEmail = !!(customer.email && customer.email.includes('@'));
+  return !hasPhone && !hasEmail;
+}
+
 // Traduce un Location Id de Square a su sede. Si no lo reconoce, devuelve null
 // (y lo deja registrado para detectarlo en logs).
 function resolveSede(locationId) {
@@ -281,6 +293,20 @@ app.post('/webhook', async (req, res) => {
     const lang = detectLang(customer.phone);
     console.log(`🗣️  Idioma: ${lang} (teléfono: ${customer.phone || 'sin teléfono'})`);
 
+    // ── NUEVO v2.3: descartar leads basura ────────────────────────────────────
+    // Sin teléfono Y sin email = no contactable → a "eliminar lead" (si está
+    // configurado). NO emite tarjeta, NO procesa flujo. Reversible (solo cambia
+    // de pipeline; no se borra). El borrado real lo hace Carlos a mano.
+    if (isJunkLead(customer)) {
+      console.log('🗑️  Lead basura (sin teléfono ni email).');
+      if (leadId && KOMMO_PIPELINE_ELIMINAR) {
+        await updateLeadInKommo(leadId, 'BASURA', KOMMO_PIPELINE_ELIMINAR, []);
+        await addNoteToKommo(leadId, '🗑️ Pangea Webhook v2.3\nLead sin teléfono ni email → movido a "eliminar lead" para descarte.');
+        console.log(`🗑️  Lead ${leadId} → eliminar lead`);
+      }
+      return res.json({ status: 'junk', reason: 'no phone and no email', leadMoved: !!(leadId && KOMMO_PIPELINE_ELIMINAR) });
+    }
+
     // ── 1. Detect client type ─────────────────────────────────────────────────
     // v2.2: si NO hay código de servicio (TT/TL/PT/PL), NO se descarta — se trata
     // como RETAIL (merch / compra sin servicio): recibe el gracias y entra al flujo
@@ -349,7 +375,7 @@ app.post('/webhook', async (req, res) => {
 
       // Internal note with all key info (visible en Kommo)
       const noteText = [
-        `🖤 Pangea Webhook v2.2`,
+        `🖤 Pangea Webhook v2.3`,
         `Tipo: ${type}${isService ? '' : ' (merch / sin servicio — sin tarjeta)'}`,
         `Idioma: ${lang}`,
         sedeName ? `Sucursal: ${sedeName} (${sede})` : `Sucursal: ⚠️ Location Id no reconocido (${location})`,
@@ -427,7 +453,7 @@ app.get('/test-lang', (req, res) => {
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: '🖤 Pangea Ink Webhook v2.2',
+    status: '🖤 Pangea Ink Webhook v2.3',
     ready:  true,
     node:   process.version,
     checks: {
@@ -442,6 +468,8 @@ app.get('/', (req, res) => {
       pipeline_PT:           !!PIPELINES.PT,
       pipeline_PL:           !!PIPELINES.PL,
       pipeline_RETAIL:       !!process.env.KOMMO_PIPELINE_RETAIL,
+      pipeline_ARTE:         !!process.env.KOMMO_PIPELINE_ARTE,
+      pipeline_eliminar:     !!KOMMO_PIPELINE_ELIMINAR,
       hc_referral_field:     !!HC_REFERRAL_FIELD_ID,
       field_sede:            !!KOMMO_FIELD_SEDE,
       field_review_link:     !!KOMMO_FIELD_REVIEW_LINK,
@@ -453,5 +481,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🖤 Pangea webhook v2.2 running on port ${PORT} (Node ${process.version})`);
+  console.log(`🖤 Pangea webhook v2.3 running on port ${PORT} (Node ${process.version})`);
 });
