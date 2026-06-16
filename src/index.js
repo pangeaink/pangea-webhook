@@ -48,7 +48,7 @@ const LOCATION_MAP = {
 const SEDE_LINKS = {
   'casco-viejo': {
     nombre:   'Casco Viejo',
-    review:   process.env.GOOGLE_REVIEW_LINK_CASCO || 'https://g.page/r/CWrIShzGWNg8EBM/review',
+    review:   process.env.GOOGLE_REVIEW_LINK_CASCO || 'https://g.page/r/CWKVvm3ah1EFEBM/review',
     calendly: process.env.CALENDLY_LINK_CASCO      || 'https://calendly.com/pangeaink-info/reserva-clon',
   },
   'via-argentina': {
